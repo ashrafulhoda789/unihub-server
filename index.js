@@ -27,7 +27,8 @@ async function run() {
         const db = client.db('unihub_db');
         const pitchesCollection = db.collection('pitches');
         const workspacesCollection = db.collection('workspaces');
-        const usersCollection = db.collection('user'); // আপনার Collection name 'user'
+        const tasksCollection = db.collection('tasks');
+        const usersCollection = db.collection('user');
 
         // 1. CREATE PITCH
         app.post('/api/pitches', async (req, res) => {
@@ -180,11 +181,20 @@ async function run() {
                     return res.status(400).send({ error: "Invalid Pitch ID" });
                 }
 
+                const queryId = new ObjectId(pitchId);
+
                 const pitches = await pitchesCollection.aggregate([
-                    { $match: { _id: new ObjectId(pitchId) } },
+                    {
+                        $match: {
+                            $or: [
+                                { _id: queryId },
+                                { workspaceId: queryId }
+                            ]
+                        }
+                    },
                     {
                         $lookup: {
-                            from: "user", // Fixed: 'users' -> 'user'
+                            from: "user",
                             localField: "members.userId",
                             foreignField: "_id",
                             as: "memberUsers"
@@ -705,6 +715,271 @@ async function run() {
                 }
 
                 res.send({ success: true, message: "Join request cancelled/deleted successfully" });
+            } catch (error) {
+                res.status(500).send({ success: false, error: error.message });
+            }
+        });
+
+
+        // --------------Task related api--------------
+
+        app.get('/api/workspaces/:workspaceId', async (req, res) => {
+            try {
+                const { workspaceId } = req.params;
+                const { userId } = req.query;
+
+                if (!ObjectId.isValid(workspaceId) || !ObjectId.isValid(userId)) {
+                    return res.status(400).send({ success: false, error: "Invalid IDs" });
+                }
+
+                const workspace = await workspacesCollection.findOne({ _id: new ObjectId(workspaceId) });
+                if (!workspace) {
+                    return res.status(404).send({ success: false, error: "Workspace not found" });
+                }
+
+                const isSupervisor = workspace.supervisorId?.toString() === userId;
+                const isMember = workspace.members?.some(m => m.userId.toString() === userId);
+
+                if (!isSupervisor && !isMember) {
+                    return res.status(403).send({ success: false, accessDenied: true, error: "Unauthorized Access" });
+                }
+
+                res.send({ success: true, workspace });
+            } catch (error) {
+                res.status(500).send({ success: false, error: error.message });
+            }
+        });
+
+        // 1. CREATE A TASK
+        // Backend - Fixed POST /api/tasks endpoint
+        app.post('/api/tasks', async (req, res) => {
+            try {
+
+                const { workspaceId, title, description, assignedTo, dueDate, status, attachments, createdBy } = req.body;
+
+                console.log("📝 Creating task with workspaceId:", workspaceId);
+
+                // Validation
+                if (!workspaceId || !ObjectId.isValid(workspaceId)) {
+                    return res.status(400).send({ success: false, error: "Invalid Workspace ID" });
+                }
+
+                if (!title || !title.trim()) {
+                    return res.status(400).send({ success: false, error: "Title is required" });
+                }
+
+                if (!createdBy || !ObjectId.isValid(createdBy)) {
+                    return res.status(400).send({ success: false, error: "Invalid User ID" });
+                }
+
+                // ✅ FIX: pitch এবং workspace উভয়ে খুঁজুন
+                const workspace = await pitchesCollection.findOne({
+                    $or: [
+                        { _id: new ObjectId(workspaceId) },
+                        { workspaceId: new ObjectId(workspaceId) }
+                    ]
+                });
+
+                if (!workspace) {
+                    console.error("❌ Workspace not found for ID:", workspaceId);
+                    return res.status(404).send({ success: false, error: "Workspace not found" });
+                }
+
+                console.log("✅ Found workspace/pitch:", workspace._id);
+
+                // Authorization Gate: Check if user is Supervisor or Lead Developer
+                const isSupervisor = workspace.supervisorId && workspace.supervisorId.toString() === createdBy;
+                const leadMember = workspace.members?.find(m => m.roleInTeam === 'Lead Developer');
+                const isLeadDev = leadMember && leadMember.userId.toString() === createdBy;
+
+                console.log("Authorization check - isSupervisor:", isSupervisor, "isLeadDev:", isLeadDev);
+
+                if (!isSupervisor && !isLeadDev) {
+                    return res.status(403).send({
+                        success: false,
+                        error: "Access denied: Only Supervisor or Lead Developer can create tasks."
+                    });
+                }
+
+                const formattedAttachments = Array.isArray(attachments)
+                    ? attachments
+                    : attachments ? [attachments] : [];
+
+                const newTask = {
+                    workspaceId: new ObjectId(workspaceId),
+                    title: title.trim(),
+                    description: description || "",
+                    assignedTo: Array.isArray(assignedTo) ? assignedTo.map(id => new ObjectId(id)) : [],
+                    status: status || "TODO",  // ✅ এখন status থাকবে
+                    attachments: formattedAttachments || [],
+                    submissionUrl: null,
+                    reviewedBy: null,
+                    dueDate: dueDate ? new Date(dueDate) : null,
+                    createdBy: new ObjectId(createdBy),
+                    createdAt: new Date(),
+                    updatedAt: new Date()
+                };
+
+                const result = await tasksCollection.insertOne(newTask);
+
+                res.status(201).send({
+                    success: true,
+                    insertedId: result.insertedId,
+                    task: {
+                        ...newTask,
+                        _id: result.insertedId,
+                        assigneeDetails: []  
+                    }
+                });
+            } catch (error) {
+                console.error("Error creating task:", error.message);
+                res.status(500).send({ success: false, error: error.message });
+            }
+        });
+
+
+        // Backend GET API Fix
+        app.get('/api/workspaces/:workspaceId/tasks', async (req, res) => {
+            try {
+                const { workspaceId } = req.params;
+                if (!ObjectId.isValid(workspaceId)) {
+                    return res.status(400).send({ success: false, error: "Invalid Workspace ID" });
+                }
+
+                const targetObjId = new ObjectId(workspaceId);
+                const now = new Date();
+
+                // 1. প্রথমে দেখুন এই ID দিয়ে Pitch/Workspace পাওয়া যায় কিনা
+                const workspacePitch = await pitchesCollection.findOne({
+                    $or: [
+                        { _id: targetObjId },
+                        { workspaceId: targetObjId }
+                    ]
+                });
+
+                // 2. Pitch পাওয়া গেলে তার _id এবং workspaceId দুটোই কালেক্ট করুন
+                let matchingIds = [targetObjId];
+                if (workspacePitch) {
+                    if (workspacePitch._id) matchingIds.push(new ObjectId(workspacePitch._id));
+                    if (workspacePitch.workspaceId) matchingIds.push(new ObjectId(workspacePitch.workspaceId));
+                }
+
+                // 3. Auto-Backlog Update
+                await tasksCollection.updateMany(
+                    {
+                        workspaceId: { $in: matchingIds },
+                        dueDate: { $exists: true, $type: "date", $lt: now },
+                        status: { $nin: ["DONE", "BACKLOG"] }
+                    },
+                    {
+                        $set: { status: "BACKLOG", updatedAt: new Date() }
+                    }
+                );
+
+                // 4. Aggregate Tasks Query ($in দিয়ে দুটো ID-ই চেক করা হচ্ছে)
+                const tasks = await tasksCollection.aggregate([
+                    {
+                        $match: {
+                            workspaceId: { $in: matchingIds }
+                        }
+                    },
+                    { $sort: { createdAt: -1 } },
+                    {
+                        $lookup: {
+                            from: "user",
+                            localField: "assignedTo",
+                            foreignField: "_id",
+                            as: "assigneeDetails"
+                        }
+                    },
+                    {
+                        $project: {
+                            "assigneeDetails.password": 0
+                        }
+                    }
+                ]).toArray();
+
+                res.send({ success: true, count: tasks.length, data: tasks });
+            } catch (error) {
+                res.status(500).send({ success: false, error: error.message });
+            }
+        });
+
+
+        // 3. KANBAN DRAG & DROP / STATUS UPDATE WITH PERMISSION LOGIC
+        app.patch('/api/tasks/:id/status', async (req, res) => {
+            try {
+                const taskId = req.params.id;
+                const { targetStatus, userId, submissionUrl } = req.body;
+
+                if (!ObjectId.isValid(taskId) || !ObjectId.isValid(userId)) {
+                    return res.status(400).send({ success: false, error: "Invalid Task or User ID" });
+                }
+
+                const task = await tasksCollection.findOne({ _id: new ObjectId(taskId) });
+                if (!task) {
+                    return res.status(404).send({ success: false, error: "Task not found" });
+                }
+
+                const workspace = await workspacesCollection.findOne({ _id: task.workspaceId });
+
+                // Rule 1: Backlog items cannot be dragged manually
+                if (task.status === "BACKLOG") {
+                    return res.status(400).send({
+                        success: false,
+                        error: "Overdue items in Backlog cannot be moved directly."
+                    });
+                }
+
+                const isSupervisor = workspace?.supervisorId?.toString() === userId;
+
+                // Rule 2: Only Supervisor can move tasks to DONE
+                if (targetStatus === "DONE") {
+                    if (!isSupervisor) {
+                        return res.status(403).send({
+                            success: false,
+                            error: "Permission denied: Only the Supervisor can approve and mark tasks as DONE."
+                        });
+                    }
+                }
+
+                const updateFields = { status: targetStatus, updatedAt: new Date() };
+
+                if (targetStatus === "DONE") {
+                    updateFields.reviewedBy = new ObjectId(userId);
+                }
+
+                // Rule 3: Students submit proof link when moving to IN_REVIEW
+                if (targetStatus === "IN_REVIEW" && submissionUrl) {
+                    updateFields.submissionUrl = submissionUrl;
+                }
+
+                const result = await tasksCollection.updateOne(
+                    { _id: new ObjectId(taskId) },
+                    { $set: updateFields }
+                );
+
+                res.send({ success: true, modifiedCount: result.modifiedCount });
+            } catch (error) {
+                res.status(500).send({ success: false, error: error.message });
+            }
+        });
+
+
+        // 4. DELETE TASK
+        app.delete('/api/tasks/:id', async (req, res) => {
+            try {
+                const taskId = req.params.id;
+                if (!ObjectId.isValid(taskId)) {
+                    return res.status(400).send({ success: false, error: "Invalid Task ID" });
+                }
+
+                const result = await tasksCollection.deleteOne({ _id: new ObjectId(taskId) });
+                if (result.deletedCount === 0) {
+                    return res.status(404).send({ success: false, error: "Task not found" });
+                }
+
+                res.send({ success: true, message: "Task deleted successfully" });
             } catch (error) {
                 res.status(500).send({ success: false, error: error.message });
             }
