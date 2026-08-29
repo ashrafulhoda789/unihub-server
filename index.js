@@ -1049,10 +1049,10 @@ async function run() {
             }
         });
 
-        // 2. GET RESOURCES (With Department, Semester & Course Filter for Frontend View)
+        // 2. GET RESOURCES (With Department, Semester, Search & Course Filter for Frontend View)
         app.get('/api/curriculum-resources', async (req, res) => {
             try {
-                const { department, semester, courseId, documentType, email } = req.query;
+                const { department, semester, courseId, documentType, email, search, q } = req.query;
                 let query = {};
 
                 if (email) {
@@ -1063,6 +1063,17 @@ async function run() {
                 if (semester && semester !== 'All') query.semester = semester;
                 if (courseId) query.courseId = courseId.toUpperCase();
                 if (documentType) query.documentType = documentType;
+
+                // Search Filter (Supports both 'search' and 'q' query params)
+                const searchQuery = search || q;
+                if (searchQuery && searchQuery.trim() !== '') {
+                    const regex = new RegExp(searchQuery.trim(), 'i');
+                    query.$or = [
+                        { title: regex },
+                        { courseName: regex },
+                        { courseId: regex }
+                    ];
+                }
 
                 const resources = await db.collection('curriculum_resources')
                     .find(query)
