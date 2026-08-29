@@ -29,6 +29,7 @@ async function run() {
         const workspacesCollection = db.collection('workspaces');
         const tasksCollection = db.collection('tasks');
         const usersCollection = db.collection('user');
+        const curriculumCollection = db.collection('curriculums');
 
         // 1. CREATE PITCH
         app.post('/api/pitches', async (req, res) => {
@@ -751,7 +752,6 @@ async function run() {
         });
 
         // 1. CREATE A TASK
-        // Backend - Fixed POST /api/tasks endpoint
         app.post('/api/tasks', async (req, res) => {
             try {
 
@@ -772,7 +772,6 @@ async function run() {
                     return res.status(400).send({ success: false, error: "Invalid User ID" });
                 }
 
-                // ✅ FIX: pitch এবং workspace উভয়ে খুঁজুন
                 const workspace = await pitchesCollection.findOne({
                     $or: [
                         { _id: new ObjectId(workspaceId) },
@@ -781,11 +780,11 @@ async function run() {
                 });
 
                 if (!workspace) {
-                    console.error("❌ Workspace not found for ID:", workspaceId);
+                    // console.error(" Workspace not found for ID:", workspaceId);
                     return res.status(404).send({ success: false, error: "Workspace not found" });
                 }
 
-                console.log("✅ Found workspace/pitch:", workspace._id);
+                // console.log("Found workspace/pitch:", workspace._id);
 
                 // Authorization Gate: Check if user is Supervisor or Lead Developer
                 const isSupervisor = workspace.supervisorId && workspace.supervisorId.toString() === createdBy;
@@ -828,7 +827,7 @@ async function run() {
                     task: {
                         ...newTask,
                         _id: result.insertedId,
-                        assigneeDetails: []  
+                        assigneeDetails: []
                     }
                 });
             } catch (error) {
@@ -921,9 +920,17 @@ async function run() {
                     return res.status(404).send({ success: false, error: "Task not found" });
                 }
 
-                const workspace = await workspacesCollection.findOne({ _id: task.workspaceId });
+                const workspace = await pitchesCollection.findOne({
+                    $or: [
+                        { _id: new ObjectId(task.workspaceId) },
+                        { workspaceId: new ObjectId(task.workspaceId) }
+                    ]
+                });
 
-                // Rule 1: Backlog items cannot be dragged manually
+                if (!workspace) {
+                    return res.status(404).send({ success: false, error: "Associated pitch/workspace not found" });
+                }
+
                 if (task.status === "BACKLOG") {
                     return res.status(400).send({
                         success: false,
@@ -931,7 +938,8 @@ async function run() {
                     });
                 }
 
-                const isSupervisor = workspace?.supervisorId?.toString() === userId;
+                // Check Supervisor ID safely
+                const isSupervisor = workspace.supervisorId && workspace.supervisorId.toString() === userId;
 
                 // Rule 2: Only Supervisor can move tasks to DONE
                 if (targetStatus === "DONE") {
@@ -982,6 +990,184 @@ async function run() {
                 res.send({ success: true, message: "Task deleted successfully" });
             } catch (error) {
                 res.status(500).send({ success: false, error: error.message });
+            }
+        });
+
+
+
+        // -----------------------Curriculum--------------------
+
+        // 1. ADD NEW RESOURCE / CURRICULUM DATA (Admin & Faculty)
+        app.post('/api/curriculum-resources', async (req, res) => {
+            try {
+                const {
+                    title,
+                    courseName,
+                    courseId,
+                    documentType, // e.g., 'pdf', 'video', 'slide'
+                    semester,
+                    department,
+                    description,
+                    fileUrl,
+                    publicId,
+                    resourceLink,
+                    uploadedBy
+                } = req.body;
+
+                // Validation
+                if (!title || !courseName || !courseId || !documentType || !semester || !department) {
+                    return res.status(400).send({
+                        success: false,
+                        message: "Required fields are missing!"
+                    });
+                }
+
+                const newResource = {
+                    title,
+                    courseName,
+                    courseId: courseId.toUpperCase(),
+                    documentType,
+                    semester,
+                    department,
+                    description: description || "",
+                    fileUrl: fileUrl || null,
+                    publicId: publicId || null,
+                    resourceLink: resourceLink || "",
+                    uploadedBy: uploadedBy || "Anonymous",
+                    createdAt: new Date()
+                };
+
+                const result = await db.collection('curriculum_resources').insertOne(newResource);
+
+                res.status(201).send({
+                    success: true,
+                    message: "Resource uploaded successfully!",
+                    insertedId: result.insertedId
+                });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 2. GET RESOURCES (With Department, Semester & Course Filter for Frontend View)
+        app.get('/api/curriculum-resources', async (req, res) => {
+            try {
+                const { department, semester, courseId, documentType, email } = req.query;
+                let query = {};
+
+                if (email) {
+                    query.uploadedBy = email;
+                }
+
+                if (department && department !== 'All') query.department = department;
+                if (semester && semester !== 'All') query.semester = semester;
+                if (courseId) query.courseId = courseId.toUpperCase();
+                if (documentType) query.documentType = documentType;
+
+                const resources = await db.collection('curriculum_resources')
+                    .find(query)
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
+                res.send({ success: true, count: resources.length, data: resources });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // Get single curriculum resource by ID
+        app.get('/api/curriculum-resources/:id', async (req, res) => {
+            try {
+                const id = req.params.id;
+
+                // Valid ObjectId kina check kora
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({ success: false, message: 'Invalid Resource ID format' });
+                }
+
+                const query = { _id: new ObjectId(id) };
+                const resource = await db.collection('curriculum_resources').findOne(query);
+
+                if (!resource) {
+                    return res.status(404).send({ success: false, message: 'Resource not found' });
+                }
+
+                res.send({ success: true, data: resource });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 4. UPDATE A RESOURCE (Admin & Faculty)
+        app.patch('/api/curriculum-resources/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({ success: false, message: "Invalid Resource ID" });
+                }
+
+                const {
+                    title,
+                    courseName,
+                    courseId,
+                    documentType,
+                    semester,
+                    department,
+                    description,
+                    fileUrl,
+                    publicId,
+                    resourceLink,
+                    updatedBy
+                } = req.body;
+
+                const updateFields = {
+                    ...(title && { title }),
+                    ...(courseName && { courseName }),
+                    ...(courseId && { courseId: courseId.toUpperCase() }),
+                    ...(documentType && { documentType }),
+                    ...(semester && { semester }),
+                    ...(department && { department }),
+                    ...(description !== undefined && { description }),
+                    ...(fileUrl && { fileUrl }),
+                    ...(publicId && { publicId }),
+                    ...(resourceLink !== undefined && { resourceLink }),
+                    updatedBy: updatedBy || "Anonymous",
+                    updatedAt: new Date()
+                };
+
+                const result = await db.collection('curriculum_resources').updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: updateFields }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).send({ success: false, message: "Resource not found" });
+                }
+
+                res.send({
+                    success: true,
+                    message: "Resource updated successfully!"
+                });
+
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 3. DELETE RESOURCE (Admin/Faculty cleanup)
+        app.delete('/api/curriculum-resources/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const result = await db.collection('curriculum_resources').deleteOne({ _id: new ObjectId(id) });
+
+                if (result.deletedCount === 0) {
+                    return res.status(404).send({ success: false, message: "Resource not found" });
+                }
+
+                res.send({ success: true, message: "Resource deleted successfully" });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
             }
         });
 
