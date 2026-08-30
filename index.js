@@ -29,7 +29,7 @@ async function run() {
         const workspacesCollection = db.collection('workspaces');
         const tasksCollection = db.collection('tasks');
         const usersCollection = db.collection('user');
-        const curriculumCollection = db.collection('curriculums');
+        const curriculumCollection = db.collection('curriculum_resources');
 
         // 1. CREATE PITCH
         app.post('/api/pitches', async (req, res) => {
@@ -293,10 +293,15 @@ async function run() {
             }
         });
 
-        // 8. GET ALL PITCHES (FIXED LOOKUP & MERGE)
+        // 8. GET ALL PITCHES 
         app.get('/api/pitches', async (req, res) => {
             try {
-                const { category, search, status } = req.query;
+                const { category, search, status, page = 1, limit = 6 } = req.query;
+
+                const pageNum = parseInt(page, 10) || 1;
+                const limitNum = parseInt(limit, 10) || 6;
+                const skip = (pageNum - 1) * limitNum;
+
                 let matchQuery = {};
 
                 if (status) matchQuery.status = status;
@@ -309,12 +314,12 @@ async function run() {
                     ];
                 }
 
-                const pitches = await pitchesCollection.aggregate([
+                const result = await pitchesCollection.aggregate([
                     { $match: matchQuery },
                     { $sort: { createdAt: -1 } },
                     {
                         $lookup: {
-                            from: "user", // Fixed: 'users' -> 'user'
+                            from: "user",
                             localField: "members.userId",
                             foreignField: "_id",
                             as: "memberUsers"
@@ -355,10 +360,27 @@ async function run() {
                             }
                         }
                     },
-                    { $project: { memberUsers: 0 } }
+                    { $project: { memberUsers: 0 } },
+                    {
+                        $facet: {
+                            metadata: [{ $count: "total" }],
+                            data: [{ $skip: skip }, { $limit: limitNum }]
+                        }
+                    }
                 ]).toArray();
 
-                res.send({ success: true, count: pitches.length, data: pitches });
+                const total = result[0]?.metadata[0]?.total || 0;
+                const totalPages = Math.ceil(total / limitNum);
+                const pitches = result[0]?.data || [];
+
+                res.send({
+                    success: true,
+                    total,
+                    totalPages,
+                    currentPage: pageNum,
+                    count: pitches.length,
+                    data: pitches
+                });
             } catch (error) {
                 res.status(500).send({ success: false, error: error.message });
             }
@@ -450,6 +472,7 @@ async function run() {
         app.get('/api/pitches/join-requests/user/:userId', async (req, res) => {
             try {
                 const userId = req.params.userId;
+                const { q, status, category, page = 1, limit = 6 } = req.query;
 
                 if (!userId || userId === 'undefined') {
                     return res.status(400).send({ success: false, error: "Valid User ID is required" });
@@ -473,24 +496,23 @@ async function run() {
                     }
                 }).toArray();
 
-                const myApplications = [];
+                let myApplications = [];
 
                 pitches.forEach(pitch => {
                     if (Array.isArray(pitch.joinRequests)) {
                         pitch.joinRequests.forEach(reqObj => {
-                            // Safe string comparison for both ObjectId and String types
                             const reqUserId = reqObj.userId ? reqObj.userId.toString() : null;
 
                             if (reqUserId === userId.toString()) {
                                 myApplications.push({
                                     requestId: reqObj._id ? reqObj._id.toString() : null,
                                     pitchId: pitch._id ? pitch._id.toString() : null,
-                                    pitchTitle: pitch.title,
-                                    category: pitch.category,
+                                    pitchTitle: pitch.title || '',
+                                    category: pitch.category || 'General',
                                     pitchStatus: pitch.status,
-                                    role: reqObj.role,
-                                    message: reqObj.message,
-                                    status: reqObj.status,
+                                    role: reqObj.role || '',
+                                    message: reqObj.message || '',
+                                    status: reqObj.status || 'PENDING',
                                     createdAt: reqObj.createdAt
                                 });
                             }
@@ -498,7 +520,45 @@ async function run() {
                     }
                 });
 
-                return res.send({ success: true, count: myApplications.length, data: myApplications });
+                // 1. Filtering Logic
+                if (status && status !== 'ALL') {
+                    myApplications = myApplications.filter(item => item.status.toUpperCase() === status.toUpperCase());
+                }
+
+                if (category && category !== 'ALL') {
+                    myApplications = myApplications.filter(item => item.category.toLowerCase() === category.toLowerCase());
+                }
+
+                if (q && q.trim() !== '') {
+                    const queryLower = q.toLowerCase().trim();
+                    myApplications = myApplications.filter(item =>
+                        item.pitchTitle.toLowerCase().includes(queryLower) ||
+                        item.role.toLowerCase().includes(queryLower) ||
+                        item.message.toLowerCase().includes(queryLower)
+                    );
+                }
+
+                // Sort by newest applications first
+                myApplications.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+
+                // 2. Pagination Logic
+                const total = myApplications.length;
+                const pageNum = parseInt(page, 10) || 1;
+                const limitNum = parseInt(limit, 10) || 6;
+                const totalPages = Math.ceil(total / limitNum) || 1;
+
+                const startIndex = (pageNum - 1) * limitNum;
+                const paginatedData = myApplications.slice(startIndex, startIndex + limitNum);
+
+                return res.send({
+                    success: true,
+                    total,
+                    totalPages,
+                    currentPage: pageNum,
+                    limit: limitNum,
+                    count: paginatedData.length,
+                    data: paginatedData
+                });
             } catch (error) {
                 console.error("Error fetching user join requests:", error);
                 return res.status(500).send({ success: false, error: error.message });
@@ -1004,17 +1064,17 @@ async function run() {
                     title,
                     courseName,
                     courseId,
-                    documentType, // e.g., 'pdf', 'video', 'slide'
+                    documentType,
                     semester,
                     department,
                     description,
+                    highlights,
                     fileUrl,
                     publicId,
                     resourceLink,
                     uploadedBy
                 } = req.body;
 
-                // Validation
                 if (!title || !courseName || !courseId || !documentType || !semester || !department) {
                     return res.status(400).send({
                         success: false,
@@ -1030,6 +1090,7 @@ async function run() {
                     semester,
                     department,
                     description: description || "",
+                    highlights: Array.isArray(highlights) ? highlights : [],
                     fileUrl: fileUrl || null,
                     publicId: publicId || null,
                     resourceLink: resourceLink || "",
@@ -1037,7 +1098,7 @@ async function run() {
                     createdAt: new Date()
                 };
 
-                const result = await db.collection('curriculum_resources').insertOne(newResource);
+                const result = await curriculumCollection.insertOne(newResource);
 
                 res.status(201).send({
                     success: true,
@@ -1052,7 +1113,12 @@ async function run() {
         // 2. GET RESOURCES (With Department, Semester, Search & Course Filter for Frontend View)
         app.get('/api/curriculum-resources', async (req, res) => {
             try {
-                const { department, semester, courseId, documentType, email, search, q } = req.query;
+                const { department, semester, courseId, documentType, email, search, q, page = 1, limit = 6 } = req.query;
+
+                const pageNum = parseInt(page, 10) || 1;
+                const limitNum = parseInt(limit, 10) || 6;
+                const skip = (pageNum - 1) * limitNum;
+
                 let query = {};
 
                 if (email) {
@@ -1064,7 +1130,6 @@ async function run() {
                 if (courseId) query.courseId = courseId.toUpperCase();
                 if (documentType) query.documentType = documentType;
 
-                // Search Filter (Supports both 'search' and 'q' query params)
                 const searchQuery = search || q;
                 if (searchQuery && searchQuery.trim() !== '') {
                     const regex = new RegExp(searchQuery.trim(), 'i');
@@ -1075,12 +1140,26 @@ async function run() {
                     ];
                 }
 
-                const resources = await db.collection('curriculum_resources')
+                // 1. Get total document count for pagination UI calculation
+                const total = await curriculumCollection.countDocuments(query);
+                const totalPages = Math.ceil(total / limitNum);
+
+                // 2. Fetch paginated data
+                const resources = await curriculumCollection
                     .find(query)
                     .sort({ createdAt: -1 })
+                    .skip(skip)
+                    .limit(limitNum)
                     .toArray();
 
-                res.send({ success: true, count: resources.length, data: resources });
+                res.send({
+                    success: true,
+                    total,
+                    totalPages,
+                    currentPage: pageNum,
+                    count: resources.length,
+                    data: resources
+                });
             } catch (error) {
                 res.status(500).send({ success: false, message: error.message });
             }
@@ -1097,7 +1176,7 @@ async function run() {
                 }
 
                 const query = { _id: new ObjectId(id) };
-                const resource = await db.collection('curriculum_resources').findOne(query);
+                const resource = await curriculumCollection.findOne(query);
 
                 if (!resource) {
                     return res.status(404).send({ success: false, message: 'Resource not found' });
@@ -1147,7 +1226,7 @@ async function run() {
                     updatedAt: new Date()
                 };
 
-                const result = await db.collection('curriculum_resources').updateOne(
+                const result = await curriculumCollection.updateOne(
                     { _id: new ObjectId(id) },
                     { $set: updateFields }
                 );
@@ -1170,7 +1249,7 @@ async function run() {
         app.delete('/api/curriculum-resources/:id', async (req, res) => {
             try {
                 const { id } = req.params;
-                const result = await db.collection('curriculum_resources').deleteOne({ _id: new ObjectId(id) });
+                const result = await curriculumCollection.deleteOne({ _id: new ObjectId(id) });
 
                 if (result.deletedCount === 0) {
                     return res.status(404).send({ success: false, message: "Resource not found" });
