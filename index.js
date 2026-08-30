@@ -30,6 +30,8 @@ async function run() {
         const tasksCollection = db.collection('tasks');
         const usersCollection = db.collection('user');
         const curriculumCollection = db.collection('curriculum_resources');
+        const classroomCollection = db.collection('classroom_resources');
+
 
         // 1. CREATE PITCH
         app.post('/api/pitches', async (req, res) => {
@@ -1256,6 +1258,201 @@ async function run() {
                 }
 
                 res.send({ success: true, message: "Resource deleted successfully" });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+
+
+        // --------------------Classroom---------------
+        // 1. ADD NEW CLASSROOM RESOURCE (Admin & Faculty)
+        app.post('/api/classroom-resources', async (req, res) => {
+            try {
+                const {
+                    title,
+                    courseName,
+                    courseId,
+                    documentType,
+                    semester,
+                    department,
+                    classroomCategory, // 'book' | 'mid' | 'final'
+                    resources, // Multiple files array: [{ fileUrl, publicId, fileName }]
+                    uploadedBy
+                } = req.body;
+
+                // Validation
+                if (!title || !courseName || !courseId || !documentType || !semester || !department || !classroomCategory) {
+                    return res.status(400).send({
+                        success: false,
+                        message: "Required fields (including classroomCategory) are missing!"
+                    });
+                }
+
+                const newClassroomResource = {
+                    title,
+                    courseName,
+                    courseId: courseId.toUpperCase(),
+                    documentType,
+                    semester,
+                    department,
+                    classroomCategory,
+                    resources: Array.isArray(resources) ? resources : [],
+                    uploadedBy: uploadedBy || "Anonymous",
+                    createdAt: new Date()
+                };
+
+                const result = await classroomCollection.insertOne(newClassroomResource);
+
+                res.status(201).send({
+                    success: true,
+                    message: "Classroom resource created successfully!",
+                    insertedId: result.insertedId
+                });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 2. GET CLASSROOM RESOURCES (Filtered by Dept, Semester, Category, Search & Pagination)
+        app.get('/api/classroom-resources', async (req, res) => {
+            try {
+                const { department, semester, classroomCategory, courseId, email, search, q, page = 1, limit = 6 } = req.query;
+
+                const pageNum = parseInt(page, 10) || 1;
+                const limitNum = parseInt(limit, 10) || 6;
+                const skip = (pageNum - 1) * limitNum;
+
+                let query = {};
+
+                if (email) query.uploadedBy = email;
+                if (department && department !== 'All') query.department = department;
+                if (semester && semester !== 'All') query.semester = semester;
+                if (classroomCategory && classroomCategory !== 'All') query.classroomCategory = classroomCategory;
+                if (courseId) query.courseId = courseId.toUpperCase();
+
+                const searchQuery = search || q;
+                if (searchQuery && searchQuery.trim() !== '') {
+                    const regex = new RegExp(searchQuery.trim(), 'i');
+                    query.$or = [
+                        { title: regex },
+                        { courseName: regex },
+                        { courseId: regex }
+                    ];
+                }
+
+                const total = await classroomCollection.countDocuments(query);
+                const totalPages = Math.ceil(total / limitNum);
+
+                const resources = await classroomCollection
+                    .find(query)
+                    .sort({ createdAt: -1 })
+                    .skip(skip)
+                    .limit(limitNum)
+                    .toArray();
+
+                res.send({
+                    success: true,
+                    total,
+                    totalPages,
+                    currentPage: pageNum,
+                    count: resources.length,
+                    data: resources
+                });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 3. GET SINGLE CLASSROOM RESOURCE BY ID
+        app.get('/api/classroom-resources/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({ success: false, message: 'Invalid Resource ID format' });
+                }
+
+                const resource = await classroomCollection.findOne({ _id: new ObjectId(id) });
+
+                if (!resource) {
+                    return res.status(404).send({ success: false, message: 'Resource not found' });
+                }
+
+                res.send({ success: true, data: resource });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 4. UPDATE A CLASSROOM RESOURCE
+        app.patch('/api/classroom-resources/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({ success: false, message: "Invalid Resource ID" });
+                }
+
+                const {
+                    title,
+                    courseName,
+                    courseId,
+                    documentType,
+                    semester,
+                    department,
+                    classroomCategory,
+                    resources, // Array of files: [{ fileUrl, publicId, fileName }]
+                    updatedBy
+                } = req.body;
+
+                const updateFields = {
+                    ...(title && { title }),
+                    ...(courseName && { courseName }),
+                    ...(courseId && { courseId: courseId.toUpperCase() }),
+                    ...(documentType && { documentType }),
+                    ...(semester && { semester }),
+                    ...(department && { department }),
+                    ...(classroomCategory && { classroomCategory }),
+                    ...(Array.isArray(resources) && { resources }), // Multiple files array update
+                    updatedBy: updatedBy || "Anonymous",
+                    updatedAt: new Date()
+                };
+
+                const result = await classroomCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: updateFields }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).send({ success: false, message: "Resource not found" });
+                }
+
+                res.send({
+                    success: true,
+                    message: "Classroom resource updated successfully!"
+                });
+            } catch (error) {
+                res.status(500).send({ success: false, message: error.message });
+            }
+        });
+
+        // 5. DELETE A CLASSROOM RESOURCE
+        app.delete('/api/classroom-resources/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).send({ success: false, message: "Invalid Resource ID" });
+                }
+
+                const result = await classroomCollection.deleteOne({ _id: new ObjectId(id) });
+
+                if (result.deletedCount === 0) {
+                    return res.status(404).send({ success: false, message: "Resource not found" });
+                }
+
+                res.send({ success: true, message: "Classroom resource deleted successfully" });
             } catch (error) {
                 res.status(500).send({ success: false, message: error.message });
             }
