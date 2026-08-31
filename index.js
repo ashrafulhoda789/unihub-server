@@ -32,6 +32,51 @@ async function run() {
         const curriculumCollection = db.collection('curriculum_resources');
         const classroomCollection = db.collection('classroom_resources');
 
+        app.get('/api/users', async (req, res) => {
+            const data = await usersCollection.find().toArray();
+            res.send(data);
+        })
+
+        app.patch('/api/users', async (req, res) => {
+            try {
+                const { userId, name, email, avatar, image } = req.body;
+
+                if (!userId || !ObjectId.isValid(userId)) {
+                    return res.status(400).json({ success: false, message: "Valid User ID is required" });
+                }
+
+                const updateData = {};
+                if (name) updateData.name = name;
+                if (email) updateData.email = email;
+
+                const imageUrl = avatar || image;
+                if (imageUrl) updateData.image = imageUrl;
+
+                if (Object.keys(updateData).length === 0) {
+                    return res.status(400).json({ success: false, message: "No profile data provided to update" });
+                }
+
+                updateData.updatedAt = new Date();
+
+                const result = await usersCollection.updateOne(
+                    { _id: new ObjectId(userId) },
+                    { $set: updateData }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).json({ success: false, message: "User not found" });
+                }
+
+                return res.status(200).json({
+                    success: true,
+                    message: "Profile updated successfully!"
+                });
+            } catch (error) {
+                console.error("Profile update error:", error);
+                return res.status(500).json({ success: false, message: "Internal server error", error: error.message });
+            }
+        });
+
 
         // 1. CREATE PITCH
         app.post('/api/pitches', async (req, res) => {
